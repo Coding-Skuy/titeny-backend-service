@@ -1,0 +1,12 @@
+CREATE TABLE IF NOT EXISTS event_masuk (
+  id SERIAL PRIMARY KEY,
+  nama TEXT NOT NULL,
+  muatan JSONB NOT NULL,
+  dibuat TIMESTAMP DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS prediksi_harga (
+  id SERIAL PRIMARY KEY,
+  komoditas TEXT NOT NULL,
+  tanggal DATE NOT NULL,
+  harga INTEGER NOT NULL
+);
