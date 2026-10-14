@@ -30,6 +30,16 @@ Layanan hidup di `http://localhost:8080`.
 - `GET /insight/harga?komoditas=cabai` — prediksi harga dari `titeny-ai-models`
 - `POST /ingest/event` — menerima 1 dari 11 event baku dari `titeny-data-pipeline`
 
+## Dokumentasi API
+
+Kontrak OpenAPI 3.1 v1.0.0 ada di [`docs/api/openapi.yaml`](docs/api/openapi.yaml) dengan tampilan Scalar di [`docs/api/index.html`](docs/api/index.html).
+
+- Online (GitHub Pages): https://coding-skuy.github.io/titeny-backend-service/api/
+- Lokal: `bun x serve docs/api` lalu buka alamat yang tampil.
+- Validasi: `bun x @redocly/cli@latest lint docs/api/openapi.yaml`
+
+Endpoint wajib: `POST /api/v1/event/masuk` (header `X-Idempotency-Key`, retry 3x 5/30/300 detik lalu DLQ). Perubahan kontrak hanya lewat bump versi + ADR baru di `docs/decisions/`.
+
 ## Struktur
 
 ```text

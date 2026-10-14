@@ -1,0 +1,1114 @@
+openapi: 3.1.0
+info:
+  title: API Titeny — AI Insight ChefGenie
+  version: 1.0.0
+  summary: Kontrak API v1.0.0 divisi Titeny (otak data ChefGenie).
+  description: |
+    Kontrak API Titeny v1.0.0. Sumber kebenaran: Titeny-TownHall
+    `platform/versions/v1.0.0/FSD/30-kontrak.md`, `data/20-kontrak-event.md`,
+    `produk/21-kontrak-api-web-bun.md`, dan `produk/22-kontrak-desktop-windows.md`.
+    Perubahan kontrak hanya lewat bump versi + ADR baru di repo ini.
+
+    **Cakupan prediksi v1.0.0**
+    - Harga: 12 komoditas x 8 pasar rujukan, horizon H+1 sampai H+7 (MAPE H+1 <= 8% median, H+7 <= 12%).
+    - Panen: 6 komoditas x 5 kabupaten (Karawang, Subang, Garut, Brebes, Malang), M+1 sampai M+4 (MAPE <= 20%).
+    - Demand: 12 komoditas, H+7 dan H+30 (MAPE H+7 <= 15%).
+    - Rentang P10-P90 dengan cakupan aktual 70-90%.
+
+    **Aturan umum**
+    - Format JSON UTF-8; waktu ISO-8601 Asia/Jakarta (`+07:00`); uang integer IDR; berat kg 2 desimal.
+    - Bodi maks 256 KB; batas 60 permintaan/menit per token (429 + `Retry-After`).
+    - Paginasi: `limit` default 50, maks 200, `cursor` opaque.
+    - Semua POST tulis idempoten: `X-Idempotency-Key` = `event_id` atau `aksi_id`; kirim ulang kembali 200 `duplikat_diabaikan` tanpa rekaman ganda.
+    - Titeny read-only terhadap DB sumber (Lumbung, TitipO, Pasaree); satu-satunya basis tulis adalah DB `titeny`.
+
+    **Autentikasi**
+    - JWT `aud=titeny`, `iss=chefgenie-auth` untuk CEO, analis, dan layanan sumber event. Akses 15 menit, refresh 7 hari dengan reuse-detection; umur sesi analis maks 8 jam dengan refresh via OTP.
+    - PIN zona 6 digit (`X-Zona-PIN`) untuk petani dan vendor pada endpoint baca dan umpan-balik.
+  contact:
+    name: Divisi Titeny — ChefGenie
+    url: https://github.com/Coding-Skuy/Titeny-TownHall
+  license:
+    name: Proprietary
+    identifier: LicenseRef-ChefGenie-Internal
+servers:
+  - url: https://api.titeny.chefgenie.id
+    description: Produksi (placeholder resmi). Semua path sudah memuat prefiks `/api/v1`.
+  - url: http://localhost:8080
+    description: Lokal (`cargo run`).
+tags:
+  - name: Kesehatan
+    description: Status layanan dan job terakhir.
+  - name: Auth
+    description: Login, verifikasi OTP, dan refresh token JWT audiens `titeny`.
+  - name: Event
+    description: Pintu masuk 11 event terkunci (idempoten).
+  - name: Prediksi
+    description: Baca prediksi harga, demand, panen.
+  - name: Rekomendasi
+    description: Rekomendasi aksi prioritas dan perubahan statusnya.
+  - name: Umpan-balik
+    description: Penilaian petani/vendor atas insight.
+  - name: Analis
+    description: Aksi kurasi analis (desktop Windows).
+security: []
+paths:
+  /api/v1/kesehatan:
+    get:
+      tags: [Kesehatan]
+      operationId: kesehatan
+      summary: Cek kesehatan layanan
+      description: |
+        Mengembalikan status, waktu job terakhir, dan versi API. Cache 30 detik.
+        Alias `GET /v1/kesehatan` tetap dilayani sesuai FSD/30.
+      responses:
+        "200":
+          description: Layanan sehat.
+          headers:
+            Cache-Control:
+              schema: { type: string, examples: ["public, max-age=30"] }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Kesehatan" }
+        "500": { $ref: "#/components/responses/KesalahanServer" }
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: authLogin
+      summary: Login akun CEO atau analis (langkah 1)
+      description: |
+        Memverifikasi kata sandi (argon2). Untuk peran `ceo` dan `analis`, server
+        mengirim OTP dan mengembalikan `sesi_id`; token terbit setelah
+        `POST /api/v1/auth/otp/verifikasi`. Endpoint turunan dari model JWT
+        (BR-005); path tidak tercantum di FSD/30.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Kredensial benar; OTP dikirim.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginTantangan" }
+        "400": { $ref: "#/components/responses/PermintaanBuruk" }
+        "401": { $ref: "#/components/responses/TidakTerautentikasi" }
+        "422": { $ref: "#/components/responses/ValidasiGagal" }
+        "429": { $ref: "#/components/responses/KuotaHabis" }
+        "500": { $ref: "#/components/responses/KesalahanServer" }
+
+  /api/v1/auth/otp/verifikasi:
+    post:
+      tags: [Auth]
+      operationId: authOtpVerifikasi
+      summary: Verifikasi OTP dan terbitkan token (langkah 2)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OtpRequest" }
+      responses:
+        "200":
+          description: Token terbit.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPasang" }
+        "400": { $ref: "#/components/responses/PermintaanBuruk" }
+        "401": { $ref: "#/components/responses/TidakTerautentikasi" }
+        "422": { $ref: "#/components/responses/ValidasiGagal" }
+        "429": { $ref: "#/components/responses/KuotaHabis" }
+        "500": { $ref: "#/components/responses/KesalahanServer" }
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: authRefresh
+      summary: Perbarui token akses dengan refresh token
+      description: |
+        Refresh token berotasi (sekali pakai). Pemakaian ulang refresh token lama
+        (reuse-detection) mencabut seluruh rantai sesi dan menjawab 401.
+        Sesi analis kedaluwarsa 8 jam sejak OTP; setelah itu wajib OTP ulang.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefreshRequest" }
+      responses:
+        "200":
+          description: Pasangan token baru.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPasang" }
+        "400": { $ref: "#/components/responses/PermintaanBuruk" }
+        "401": { $ref: "#/components/responses/TidakTerautentikasi" }
+        "422": { $ref: "#/components/responses/ValidasiGagal" }
+        "500": { $ref: "#/components/responses/KesalahanServer" }
+
+  /api/v1/event/masuk:
+    post:
+      tags: [Event]
+      operationId: eventMasuk
+      summary: Terima satu event (11 event_type terkunci)
+      description: |
+        Pintu masuk tunggal event dari sumber (`lumbung`, `titipo`, `pasaree`,
+        `cuaca`, `internal`) dengan token layanan.
+
+        - Header `X-Idempotency-Key` wajib dan sama dengan `event_id`.
+        - Timeout sumber 10 detik; retry maks 3x dengan jeda 5, 30, 300 detik, lalu
+          antrean mati (DLQ) dan pager berbunyi.
+        - Urutan tidak dijamin; keterlambatan hingga 24 jam memicu rekalkulasi agregat H-1.
+        - `event_type` di luar 11 terkunci ditolak 422 `event_type_tidak_dikenal`.
+        - Duplikat dijawab 200 `duplikat_diabaikan` (bukan galat).
+        - Validasi gagal: perbaiki dan kirim ulang dengan `event_id` baru.
+        - `pedaree.stok.v1` bukan bagian registry ini.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/XIdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EventMasuk" }
+            examples:
+              hargaDiperbarui:
+                summary: harga.diperbarui dari Pasaree
+                value:
+                  event_id: evt_20261004_000123
+                  event_type: harga.diperbarui
+                  schema_version: 1
+                  source: pasaree
+                  occurred_at: "2026-10-04T07:00:00+07:00"
+                  received_at: "2026-10-04T07:00:41+07:00"
+                  batch_id: batch_pasaree_20261004_pagi
+                  payload:
+                    pasar_id: psr_jakarta_timur_01
+                    komoditas_id: cmd_cabai_merah
+                    tanggal: "2026-10-04"
+                    harga_per_kg: 42000
+                    satuan: kg
+                    jumlah_sampel_lapak: 6
+                    flag: ok
+              transaksiDibuat:
+                summary: transaksi.dibuat dari TitipO
+                value:
+                  event_id: evt_20261004_000124
+                  event_type: transaksi.dibuat
+                  schema_version: 1
+                  source: titipo
+                  occurred_at: "2026-10-04T08:12:00+07:00"
+                  received_at: "2026-10-04T08:12:03+07:00"
+                  batch_id: batch_titipo_20261004_pagi
+                  payload:
+                    transaksi_id: trx_20261004_881201
+                    komoditas_id: cmd_telur_ayam
+                    qty_kg: 2.00
+                    harga_satuan: 28500
+                    vendor_id: vnd_keliling_014
+                    zona_rute: bekasi_utara
+                    waktu: "2026-10-04T08:12:00+07:00"
+      responses:
+        "200":
+          description: Event diterima atau duplikat diabaikan.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventDiterima" }
+              examples:
+                diterima: { value: { status: diterima } }
+                duplikat: { value: { status: duplikat_diabaikan } }
+        "400": { $ref: "#/components/responses/PermintaanBuruk" }
+        "401": { $ref: "#/components/responses/TidakTerautentikasi" }
+        "403": { $ref: "#/components/responses/TidakBerhak" }
+        "409": { $ref: "#/components/responses/Konflik" }
+        "422":
+          description: Validasi event gagal; sumber wajib memperbaiki dan mengirim ulang dengan `event_id` baru.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventDitolak" }
+              examples:
+                tipeTakDikenal:
+                  value: { status: ditolak, alasan: event_type_tidak_dikenal, field: event_type }
+                sampelKurang:
+                  value: { status: ditolak, alasan: validasi_gagal, field: payload.jumlah_sampel_lapak }
+        "429": { $ref: "#/components/responses/KuotaHabis" }
+        "500": { $ref: "#/components/responses/KesalahanServer" }
+
+  /api/v1/harga:
+    get:
+      tags: [Prediksi]
+      operationId: bacaHarga
+      summary: Prediksi harga wajar H+1 sampai H+7
+      description: |
+        12 komoditas x 8 pasar, dihitung 04.00 WIB (hitung ulang 15.00 bila ada
+        koreksi siang). Harga dibulatkan kelipatan 500 IDR. `kepercayaan: rendah`
+        wajib memunculkan lencana "Akurasi terbatas" di papan. Cache 6 jam.
+      security:
+        - zonaPin: []
+        - bearerAuth: []
+      parameters:
+        - { $ref: "#/components/parameters/KomoditasId" }
+        - { $ref: "#/components/parameters/PasarId" }
+        - name: dari
+          in: query
+          description: Tanggal awal (inklusif).
+          schema: { type: string, format: date }
+        - name: sampai
+          in: query
+          description: Tanggal akhir (inklusif); maksimum H+7 dari hari ini.
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Deret prediksi harga.
+          headers:
+            Cache-Control:
+              schema: { type: string, examples: ["public, max-age=21600"] }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PrediksiHargaRespons" }
+        "400": { $ref: "#/components/responses/PermintaanBuruk" }
+        "401": { $ref: "#/components/responses/TidakTerautentikasi" }
+        "403": { $ref: "#/components/responses/TidakBerhak" }
+        "404": { $ref: "#/components/responses/TidakDitemukan" }
+        "422": { $ref: "#/components/responses/ValidasiGagal" }
+        "429": { $ref: "#/components/responses/KuotaHabis" }
+        "500": { $ref: "#/components/responses/KesalahanServer" }
+
+  /api/v1/demand:
+    get:
+      tags: [Prediksi]
+      operationId: bacaDemand
+      summary: Prediksi demand H+7 / H+30 per zona
+      description: |
+        Demand 12 komoditas per zona (8 zona rute TitipO + 8 pasar Pasaree),
+        dihitung 04.30 WIB. MAPE H+7 <= 15%, H+30 <= 22% (pantau). `sinyal`:
+        `surplus` (panen >= 120% demand), `defisit` (panen <= 80% demand), selain itu `seimbang`.
+      security:
+        - zonaPin: []
+        - bearerAuth: []
+      parameters:
+        - { $ref: "#/components/parameters/KomoditasId" }
+        - name: zona
+          in: query
+          description: Zona rute TitipO atau pasar Pasaree (contoh `bekasi_utara`).
+          schema: { type: string }
+        - name: horizon
+          in: query
+          schema: { $ref: "#/components/schemas/HorizonDemand" }
+      responses:
+        "200":
+          description: Prediksi demand.
+          headers:
+            Cache-Control:
+              schema: { type: string, examples: ["public, max-age=21600"] }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PrediksiDemand" }
+        "400": { $ref: "#/components/responses/PermintaanBuruk" }
+        "401": { $ref: "#/components/responses/TidakTerautentikasi" }
+        "403": { $ref: "#/components/responses/TidakBerhak" }
+        "404": { $ref: "#/components/responses/TidakDitemukan" }
+        "422": { $ref: "#/components/responses/ValidasiGagal" }
+        "429": { $ref: "#/components/responses/KuotaHabis" }
+        "500": { $ref: "#/components/responses/KesalahanServer" }
+
+  /api/v1/panen:
+    get:
+      tags: [Prediksi]
+      operationId: bacaPanen
+      summary: Prediksi panen mingguan M+1 sampai M+4
+      description: |
+        6 komoditas (padi, jagung, cabai merah, cabai rawit, bawang merah, tomat)
+        x 5 kabupaten (Karawang, Subang, Garut, Brebes, Malang), dihitung Senin
+        03.00 WIB. Dibulatkan kelipatan 50 kg. MAPE total musim <= 20%.
+      security:
+        - zonaPin: []
+        - bearerAuth: []
+      parameters:
+        - { $ref: "#/components/parameters/KomoditasId" }
+        - name: kabupaten_id
+          in: query
+          schema: { $ref: "#/components/schemas/KabupatenId" }
+        - name: minggu
+          in: query
+          description: Minggu ISO.
+          schema: { type: string, pattern: "^\\d{4}-W\\d{2}$", examples: ["2026-W41"] }
+      responses:
+        "200":
+          description: Prediksi panen.
+          headers:
+            Cache-Control:
+              schema: { type: string, examples: ["public, max-age=21600"] }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PrediksiPanenRespons" }
+        "400": { $ref: "#/components/responses/PermintaanBuruk" }
+        "401": { $ref: "#/components/responses/TidakTerautentikasi" }
+        "403": { $ref: "#/components/responses/TidakBerhak" }
+        "404": { $ref: "#/components/responses/TidakDitemukan" }
+        "422": { $ref: "#/components/responses/ValidasiGagal" }
+        "429": { $ref: "#/components/responses/KuotaHabis" }
+        "500": { $ref: "#/components/responses/KesalahanServer" }
+
+  /api/v1/rekomendasi:
+    get:
+      tags: [Rekomendasi]
+      operationId: bacaRekomendasi
+      summary: Daftar rekomendasi aksi prioritas
+      description: Maks 3 aksi per zona; angka dibulatkan ke 100 kg. Siap tampil di papan CEO/vendor.
+      security:
+        - zonaPin: []
+        - bearerAuth: []
+      parameters:
+        - name: zona
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          description: Default 5 pada papan; maks 200.
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          description: Cursor opaque dari respons sebelumnya.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Daftar rekomendasi.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RekomendasiDaftar" }
+        "400": { $ref: "#/components/responses/PermintaanBuruk" }
+        "401": { $ref: "#/components/responses/TidakTerautentikasi" }
+        "403": { $ref: "#/components/responses/TidakBerhak" }
+        "422": { $ref: "#/components/responses/ValidasiGagal" }
+        "429": { $ref: "#/components/responses/KuotaHabis" }
+        "500": { $ref: "#/components/responses/KesalahanServer" }
+
+  /api/v1/rekomendasi/{id}/status:
+    post:
+      tags: [Rekomendasi]
+      operationId: ubahStatusRekomendasi
+      summary: Ubah status rekomendasi (CEO/analis)
+      description: Transisi `baru` ke `dikerjakan` ke `selesai`, dengan `catatan` maks 140 karakter.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UbahStatusRekomendasi" }
+      responses:
+        "200":
+          description: Status diperbarui.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Rekomendasi" }
+        "400": { $ref: "#/components/responses/PermintaanBuruk" }
+        "401": { $ref: "#/components/responses/TidakTerautentikasi" }
+        "403": { $ref: "#/components/responses/TidakBerhak" }
+        "404": { $ref: "#/components/responses/TidakDitemukan" }
+        "409": { $ref: "#/components/responses/Konflik" }
+        "422": { $ref: "#/components/responses/ValidasiGagal" }
+        "429": { $ref: "#/components/responses/KuotaHabis" }
+        "500": { $ref: "#/components/responses/KesalahanServer" }
+
+  /api/v1/umpan-balik:
+    post:
+      tags: [Umpan-balik]
+      operationId: kirimUmpanBalik
+      summary: Kirim umpan-balik petani/vendor
+      description: |
+        Disimpan untuk metrik adopsi; tidak mengubah model otomatis. Umpan-balik
+        dari PIN yang sama di atas 20x/hari diabaikan (anti-gaming, BR-305).
+      security:
+        - zonaPin: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UmpanBalik" }
+      responses:
+        "200":
+          description: Umpan-balik dicatat.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatusDiterima" }
+        "400": { $ref: "#/components/responses/PermintaanBuruk" }
+        "401": { $ref: "#/components/responses/TidakTerautentikasi" }
+        "422": { $ref: "#/components/responses/ValidasiGagal" }
+        "429": { $ref: "#/components/responses/KuotaHabis" }
+        "500": { $ref: "#/components/responses/KesalahanServer" }
+
+  /api/v1/analis/antrean:
+    get:
+      tags: [Analis]
+      operationId: antreanValidasi
+      summary: Antrean flag perlu_verifikasi
+      description: |
+        Daftar flag `perlu_verifikasi` (harga di luar rentang, stok selisih > 1%,
+        panen outlier) untuk desktop analis; polling 5 menit. Path turunan dari
+        FSD/10 butir 4 (FSD/30 hanya menamai dua endpoint tulis analis).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Antrean validasi.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AntreanValidasi" }
+        "401": { $ref: "#/components/responses/TidakTerautentikasi" }
+        "403": { $ref: "#/components/responses/TidakBerhak" }
+        "429": { $ref: "#/components/responses/KuotaHabis" }
+        "500": { $ref: "#/components/responses/KesalahanServer" }
+
+  /api/v1/analis/validasi:
+    post:
+      tags: [Analis]
+      operationId: analisValidasi
+      summary: Putuskan flag (setuju / koreksi_nilai / tolak)
+      description: |
+        Idempoten dengan `aksi_id`. Alasan wajib 10-140 karakter. Tercatat di log
+        audit 2 tahun (siapa, kapan, apa, alasan) yang tidak dapat dihapus analis.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/XIdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ValidasiAnalis" }
+            examples:
+              koreksi:
+                value:
+                  aksi_id: aks_20261004_001
+                  event_id: evt_20261004_000123
+                  keputusan: koreksi_nilai
+                  nilai_baru: 41000
+                  alasan: Salah input lapak 042, nota terlampir.
+      responses:
+        "200":
+          description: Keputusan dicatat atau duplikat diabaikan.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventDiterima" }
+        "400": { $ref: "#/components/responses/PermintaanBuruk" }
+        "401": { $ref: "#/components/responses/TidakTerautentikasi" }
+        "403": { $ref: "#/components/responses/TidakBerhak" }
+        "404": { $ref: "#/components/responses/TidakDitemukan" }
+        "409": { $ref: "#/components/responses/Konflik" }
+        "422": { $ref: "#/components/responses/ValidasiGagal" }
+        "429": { $ref: "#/components/responses/KuotaHabis" }
+        "500": { $ref: "#/components/responses/KesalahanServer" }
+
+  /api/v1/analis/tahan:
+    post:
+      tags: [Analis]
+      operationId: analisTahan
+      summary: Tahan prediksi komoditas-pasar (maks 7 hari)
+      description: |
+        Menyembunyikan pasangan komoditas-pasar dari papan petani; tidak mengubah
+        angka. Kedaluwarsa otomatis paling lambat 7 hari. Idempoten dengan `aksi_id`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/XIdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TahanPrediksi" }
+            examples:
+              tahan:
+                value:
+                  aksi_id: aks_20261004_002
+                  komoditas_id: cmd_cabai_merah
+                  pasar_id: psr_jakarta_timur_01
+                  alasan: Sampel hanya 2 lapak.
+                  berlaku_sampai: "2026-10-07"
+      responses:
+        "200":
+          description: Penahanan dicatat atau duplikat diabaikan.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventDiterima" }
+        "400": { $ref: "#/components/responses/PermintaanBuruk" }
+        "401": { $ref: "#/components/responses/TidakTerautentikasi" }
+        "403": { $ref: "#/components/responses/TidakBerhak" }
+        "404": { $ref: "#/components/responses/TidakDitemukan" }
+        "409": { $ref: "#/components/responses/Konflik" }
+        "422": { $ref: "#/components/responses/ValidasiGagal" }
+        "429": { $ref: "#/components/responses/KuotaHabis" }
+        "500": { $ref: "#/components/responses/KesalahanServer" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT `aud=titeny`, `iss=chefgenie-auth` untuk CEO, analis, dan layanan sumber event. Salah audiens ditolak 401.
+    zonaPin:
+      type: apiKey
+      in: header
+      name: X-Zona-PIN
+      description: PIN zona 6 digit untuk petani dan vendor (hanya endpoint baca dan umpan-balik).
+
+  parameters:
+    XIdempotencyKey:
+      name: X-Idempotency-Key
+      in: header
+      required: true
+      description: Kunci idempoten; sama dengan `event_id` (event) atau `aksi_id` (aksi analis). Kirim ulang kunci sama kembali 200 `duplikat_diabaikan`.
+      schema: { type: string, minLength: 1, maxLength: 64 }
+      examples:
+        event: { value: evt_20261004_000123 }
+        aksi: { value: aks_20261004_001 }
+    KomoditasId:
+      name: komoditas_id
+      in: query
+      description: ID komoditas (12 untuk harga/demand; 6 untuk panen).
+      schema: { $ref: "#/components/schemas/KomoditasId" }
+    PasarId:
+      name: pasar_id
+      in: query
+      description: ID pasar rujukan (8 pasar).
+      schema: { $ref: "#/components/schemas/PasarId" }
+
+  responses:
+    PermintaanBuruk:
+      description: 400 — permintaan tidak dapat dibaca (JSON rusak, parameter salah tipe).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Galat" }
+          example: { error: { kode: validasi_gagal, pesan: "Bodi bukan JSON yang sah.", field: null } }
+    TidakTerautentikasi:
+      description: 401 — token atau PIN tidak ada, kedaluwarsa, salah audiens, atau refresh dipakai ulang.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Galat" }
+          example: { error: { kode: tidak_berhak, pesan: "Token kedaluwarsa.", field: null } }
+    TidakBerhak:
+      description: 403 — peran ditolak untuk endpoint ini.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Galat" }
+          example: { error: { kode: tidak_berhak, pesan: "Peran tidak diizinkan.", field: null } }
+    TidakDitemukan:
+      description: 404 — sumber daya tidak ada, atau data belum cukup (`data_belum_cukup`, contoh S1 kosong 3 hari berturut).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Galat" }
+          examples:
+            komoditas: { value: { error: { kode: tidak_ditemukan, pesan: "Komoditas tidak dikenal.", field: komoditas_id } } }
+            dataKurang: { value: { error: { kode: data_belum_cukup, pesan: "Data harga belum cukup.", field: null } } }
+    Konflik:
+      description: 409 — konflik versi atau transisi status tidak sah.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Galat" }
+          example: { error: { kode: validasi_gagal, pesan: "Konflik versi; muat ulang data.", field: null } }
+    ValidasiGagal:
+      description: 422 — validasi berkode plus nama field.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Galat" }
+          example: { error: { kode: validasi_gagal, pesan: "Alasan harus 10-140 karakter.", field: alasan } }
+    KuotaHabis:
+      description: 429 — melebihi 60 permintaan/menit per token.
+      headers:
+        Retry-After:
+          description: Detik sebelum boleh mencoba lagi.
+          schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Galat" }
+          example: { error: { kode: kuota_habis, pesan: "Kuota habis; coba lagi nanti.", field: null } }
+    KesalahanServer:
+      description: 500 — kesalahan server (`AppError`).
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Galat" }
+          example: { error: { kode: kesalahan_server, pesan: "Terjadi kesalahan di server.", field: null } }
+
+  schemas:
+    # ---------- umum
+    Galat:
+      type: object
+      description: Amplop galat baku (`AppError`).
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [kode, pesan]
+          properties:
+            kode:
+              type: string
+              enum: [tidak_ditemukan, validasi_gagal, tidak_berhak, kuota_habis, data_belum_cukup, kesalahan_server]
+            pesan:
+              type: string
+              description: Pesan berbahasa Indonesia.
+            field:
+              type: [string, "null"]
+    KomoditasId:
+      type: string
+      pattern: "^cmd_[a-z_]+$"
+      description: |
+        ID komoditas. Harga/demand (12): beras medium, telur ayam, cabai merah,
+        cabai rawit, bawang merah, bawang putih, minyak goreng curah, gula pasir,
+        daging ayam, daging sapi, tomat, kangkung. Panen (6): padi, jagung,
+        cabai merah, cabai rawit, bawang merah, tomat.
+      examples: [cmd_cabai_merah]
+    PasarId:
+      type: string
+      pattern: "^psr_[a-z0-9_]+$"
+      description: ID pasar rujukan Pasaree (8 pasar).
+      examples: [psr_jakarta_timur_01]
+    KabupatenId:
+      type: string
+      pattern: "^kab_[a-z_]+$"
+      description: Salah satu dari 5 kabupaten panen (Karawang, Subang, Garut, Brebes, Malang).
+      examples: [kab_karawang]
+    Kepercayaan:
+      type: string
+      enum: [tinggi, sedang, rendah]
+      description: tinggi = sampel >= 5 lapak dan MAPE_14h < 8%; rendah = sampel < 3 atau MAPE_14h > 15%.
+    Sinyal:
+      type: string
+      enum: [surplus, seimbang, defisit]
+    HorizonHarga:
+      type: string
+      enum: ["H+1", "H+2", "H+3", "H+4", "H+5", "H+6", "H+7"]
+    HorizonDemand:
+      type: string
+      enum: ["H+7_total_kg", "H+30"]
+    IDR:
+      type: integer
+      minimum: 0
+      description: Uang dalam rupiah, integer tanpa desimal.
+    StatusDiterima:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [diterima] }
+    EventDiterima:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [diterima, duplikat_diabaikan] }
+    EventDitolak:
+      type: object
+      description: Amplop 422 khusus ingest event (sesuai data/20-kontrak-event.md bagian 4).
+      required: [status, alasan, field]
+      properties:
+        status: { type: string, enum: [ditolak] }
+        alasan:
+          type: string
+          description: Kode alasan, contoh `event_type_tidak_dikenal`, `validasi_gagal`.
+        field: { type: string }
+    Kesehatan:
+      type: object
+      required: [status, job_terakhir, versi_api]
+      properties:
+        status: { type: string, enum: [ok] }
+        job_terakhir: { type: string, format: date-time }
+        versi_api: { type: string, examples: [v1.0.0] }
+
+    # ---------- auth
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string }
+        password: { type: string, format: password }
+    LoginTantangan:
+      type: object
+      required: [sesi_id, otp_diperlukan]
+      properties:
+        sesi_id: { type: string }
+        otp_diperlukan: { type: boolean, const: true }
+    OtpRequest:
+      type: object
+      required: [sesi_id, otp]
+      properties:
+        sesi_id: { type: string }
+        otp: { type: string, pattern: "^\\d{6}$" }
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+    TokenPasang:
+      type: object
+      required: [access_token, refresh_token, token_type, expires_in]
+      properties:
+        access_token: { type: string, description: "JWT `aud=titeny`, kedaluwarsa 15 menit." }
+        refresh_token: { type: string, description: Berlaku 7 hari; sekali pakai. }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer, const: 900, description: Detik. }
+        peran: { type: string, enum: [ceo, analis, layanan] }
+
+    # ---------- event
+    EventMasuk:
+      type: object
+      description: Amplop standar event. Header `X-Idempotency-Key` sama dengan `event_id`.
+      required: [event_id, event_type, schema_version, source, occurred_at, received_at, batch_id, payload]
+      properties:
+        event_id:
+          type: string
+          pattern: "^evt_\\d{8}_\\d{6}$"
+          description: Unik global; duplikat diabaikan.
+          examples: [evt_20261004_000123]
+        event_type:
+          $ref: "#/components/schemas/EventType"
+        schema_version:
+          type: integer
+          minimum: 1
+          description: Mulai dari 1; ubah tipe/makna field menaikkan mayor (dual-read 30 hari).
+        source:
+          type: string
+          enum: [lumbung, titipo, pasaree, cuaca, internal]
+        occurred_at: { type: string, format: date-time, description: Waktu kejadian di sumber. }
+        received_at: { type: string, format: date-time, description: Waktu diterima Titeny. }
+        batch_id: { type: string, examples: [batch_pasaree_20261004_pagi] }
+        payload:
+          description: Payload sesuai `event_type` (lihat skema `Payload*`).
+          oneOf:
+            - $ref: "#/components/schemas/PayloadHargaDiperbarui"
+            - $ref: "#/components/schemas/PayloadStokBerubah"
+            - $ref: "#/components/schemas/PayloadStokSnapshotHarian"
+            - $ref: "#/components/schemas/PayloadTransaksiDibuat"
+            - $ref: "#/components/schemas/PayloadLapakStatusBerubah"
+            - $ref: "#/components/schemas/PayloadPanenDicatat"
+            - $ref: "#/components/schemas/PayloadLogistikBiayaDiperbarui"
+            - $ref: "#/components/schemas/PayloadVendorStatusBerubah"
+            - $ref: "#/components/schemas/PayloadCuacaDiperbarui"
+            - $ref: "#/components/schemas/PayloadKalenderDikunci"
+            - $ref: "#/components/schemas/PayloadKeuanganRingkasanHarian"
+    EventType:
+      type: string
+      description: |
+        Registry TERKUNCI 11 event. Di luar daftar ditolak `event_type_tidak_dikenal`.
+        Kunci idempoten: harga.diperbarui = pasar_id+komoditas_id+tanggal; stok.berubah = event_id;
+        stok.snapshot_harian = gudang_id+tanggal; transaksi.dibuat = transaksi_id;
+        lapak.status_berubah = lapak_id+occurred_at; panen.dicatat = panen_id;
+        logistik.biaya_diperbarui = rute_id+berlaku_mulai; vendor.status_berubah = vendor_id+occurred_at;
+        cuaca.diperbarui = kabupaten_id+tanggal; kalender.dikunci = tahun; keuangan.ringkasan_harian = tanggal.
+      enum:
+        - harga.diperbarui
+        - stok.berubah
+        - stok.snapshot_harian
+        - transaksi.dibuat
+        - lapak.status_berubah
+        - panen.dicatat
+        - logistik.biaya_diperbarui
+        - vendor.status_berubah
+        - cuaca.diperbarui
+        - kalender.dikunci
+        - keuangan.ringkasan_harian
+    PayloadHargaDiperbarui:
+      type: object
+      description: "`harga.diperbarui` (sumber pasaree). Bila `jumlah_sampel_lapak` < 3, `flag` wajib `perlu_verifikasi`."
+      required: [pasar_id, komoditas_id, tanggal, harga_per_kg, satuan, jumlah_sampel_lapak, flag]
+      properties:
+        pasar_id: { $ref: "#/components/schemas/PasarId" }
+        komoditas_id: { $ref: "#/components/schemas/KomoditasId" }
+        tanggal: { type: string, format: date }
+        harga_per_kg: { type: integer, exclusiveMinimum: 0, description: IDR per kg. }
+        satuan: { type: string, enum: [kg] }
+        jumlah_sampel_lapak: { type: integer, minimum: 0 }
+        flag: { type: string, enum: [ok, perlu_verifikasi] }
+    PayloadStokBerubah:
+      type: object
+      description: "`stok.berubah` (sumber lumbung, real-time). Stok tidak boleh negatif."
+      required: [gudang_id, komoditas_id, perubahan_kg, stok_akhir_kg, alasan]
+      properties:
+        gudang_id: { type: string, examples: [gdg_bekasi_01] }
+        komoditas_id: { $ref: "#/components/schemas/KomoditasId" }
+        perubahan_kg: { type: number, multipleOf: 0.01 }
+        stok_akhir_kg: { type: number, minimum: 0, multipleOf: 0.01 }
+        alasan: { type: string, enum: [masuk_panen, masuk_beli, keluar_penjualan, susut, koreksi_opname] }
+    PayloadStokSnapshotHarian:
+      type: object
+      description: "`stok.snapshot_harian` (lumbung, harian 23.00)."
+      required: [gudang_id, tanggal, baris, jumlah_baris]
+      properties:
+        gudang_id: { type: string }
+        tanggal: { type: string, format: date }
+        baris:
+          type: array
+          items:
+            type: object
+            required: [komoditas_id, stok_kg]
+            properties:
+              komoditas_id: { $ref: "#/components/schemas/KomoditasId" }
+              stok_kg: { type: number, minimum: 0 }
+        jumlah_baris: { type: integer, minimum: 0 }
+    PayloadTransaksiDibuat:
+      type: object
+      description: "`transaksi.dibuat` (titipo, real-time). Tanpa nama pembeli. Di atas 50 kg ditandai grosir."
+      required: [transaksi_id, komoditas_id, qty_kg, harga_satuan, vendor_id, zona_rute, waktu]
+      properties:
+        transaksi_id: { type: string, examples: [trx_20261004_881201] }
+        komoditas_id: { $ref: "#/components/schemas/KomoditasId" }
+        qty_kg: { type: number, exclusiveMinimum: 0, maximum: 50, multipleOf: 0.01 }
+        harga_satuan: { $ref: "#/components/schemas/IDR" }
+        vendor_id: { type: string, examples: [vnd_keliling_014] }
+        zona_rute: { type: string, examples: [bekasi_utara] }
+        waktu: { type: string, format: date-time }
+    PayloadLapakStatusBerubah:
+      type: object
+      description: "`lapak.status_berubah` (pasaree, real-time)."
+      required: [lapak_id, status, komoditas_utama]
+      properties:
+        lapak_id: { type: string, examples: [lpk_042] }
+        status: { type: string, enum: [aktif, tutup, libur] }
+        komoditas_utama: { $ref: "#/components/schemas/KomoditasId" }
+    PayloadPanenDicatat:
+      type: object
+      description: "`panen.dicatat` (lumbung). Hasil/ha harus 500-15.000 kg/ha; di luar itu `keterangan` wajib."
+      required: [panen_id, komoditas_id, lahan_ha, hasil_kg, tanggal_panen, mutu, kabupaten_id]
+      properties:
+        panen_id: { type: string, examples: [pn_20261001_0091] }
+        komoditas_id: { $ref: "#/components/schemas/KomoditasId" }
+        lahan_ha: { type: number, exclusiveMinimum: 0 }
+        hasil_kg: { type: number, exclusiveMinimum: 0, multipleOf: 0.01 }
+        tanggal_panen: { type: string, format: date }
+        mutu: { type: string, enum: [A, B, C] }
+        kabupaten_id: { $ref: "#/components/schemas/KabupatenId" }
+        keterangan: { type: string }
+    PayloadLogistikBiayaDiperbarui:
+      type: object
+      description: "`logistik.biaya_diperbarui` (titipo/pasaree, episodik)."
+      required: [rute_id, jarak_km, biaya_per_kg, moda, berlaku_mulai, sebab]
+      properties:
+        rute_id: { type: string, examples: [rte_bekasi_jaktim] }
+        jarak_km: { type: number, exclusiveMinimum: 0 }
+        biaya_per_kg: { $ref: "#/components/schemas/IDR" }
+        moda: { type: string, enum: [motor, mobil_pickup, truk] }
+        berlaku_mulai: { type: string, format: date }
+        sebab: { type: string, examples: [penyesuaian_bbm] }
+    PayloadVendorStatusBerubah:
+      type: object
+      description: "`vendor.status_berubah` (titipo/pasaree, real-time)."
+      required: [vendor_id, jenis, status_aktif, zona_operasi, kapasitas_harian_kg]
+      properties:
+        vendor_id: { type: string }
+        jenis: { type: string, enum: [keliling, lapak, produsen] }
+        status_aktif: { type: boolean }
+        zona_operasi: { type: string }
+        kapasitas_harian_kg: { type: number, minimum: 0 }
+    PayloadCuacaDiperbarui:
+      type: object
+      description: "`cuaca.diperbarui` (cuaca/BMKG, harian 05.00)."
+      required: [kabupaten_id, tanggal, curah_hujan_mm, suhu_avg_c, peringatan]
+      properties:
+        kabupaten_id: { $ref: "#/components/schemas/KabupatenId" }
+        tanggal: { type: string, format: date }
+        curah_hujan_mm: { type: number, minimum: 0 }
+        suhu_avg_c: { type: number }
+        peringatan: { type: string, enum: [tidak_ada, banjir, kekeringan] }
+    PayloadKalenderDikunci:
+      type: object
+      description: "`kalender.dikunci` (internal, tahunan; dikunci 1 Desember untuk tahun berikutnya)."
+      required: [tahun, baris, jumlah_baris, dikunci_pada]
+      properties:
+        tahun: { type: integer, minimum: 2026 }
+        baris:
+          type: array
+          items:
+            type: object
+            required: [tanggal, jenis_hari, musim]
+            properties:
+              tanggal: { type: string, format: date }
+              jenis_hari: { type: string, enum: [biasa, puasa, lebaran, natal, tahun_baru, panen_raya] }
+              musim: { type: string, enum: [hujan, kemarau, peralihan] }
+        jumlah_baris: { type: integer, minimum: 0 }
+        dikunci_pada: { type: string, format: date-time }
+    PayloadKeuanganRingkasanHarian:
+      type: object
+      description: "`keuangan.ringkasan_harian` (lumbung, harian 23.45). Semua uang integer IDR."
+      required: [tanggal, omzet_idr, margin_kotor_idr, biaya_operasional_idr, piutang_idr, final]
+      properties:
+        tanggal: { type: string, format: date }
+        omzet_idr: { $ref: "#/components/schemas/IDR" }
+        margin_kotor_idr: { type: integer }
+        biaya_operasional_idr: { $ref: "#/components/schemas/IDR" }
+        piutang_idr: { $ref: "#/components/schemas/IDR" }
+        final: { type: boolean }
+
+    # ---------- prediksi
+    PrediksiHarga:
+      type: object
+      required: [tanggal, horizon, harga_prediksi, rentang_bawah, rentang_atas, kepercayaan]
+      properties:
+        tanggal: { type: string, format: date, description: Tanggal prediksi. }
+        horizon: { $ref: "#/components/schemas/HorizonHarga" }
+        harga_prediksi: { type: integer, multipleOf: 500, description: IDR kelipatan 500. }
+        rentang_bawah: { type: integer, description: P10 residual 30 hari. }
+        rentang_atas: { type: integer, description: P90 residual 30 hari. }
+        kepercayaan: { $ref: "#/components/schemas/Kepercayaan" }
+        alasan_singkat: { type: string, examples: ["stok_gudang_72%_dari_rerata + musim_peralihan"] }
+    PrediksiHargaRespons:
+      type: object
+      required: [komoditas_id, pasar_id, deret, model_version, dihitung_pada]
+      properties:
+        komoditas_id: { $ref: "#/components/schemas/KomoditasId" }
+        pasar_id: { $ref: "#/components/schemas/PasarId" }
+        deret:
+          type: array
+          items: { $ref: "#/components/schemas/PrediksiHarga" }
+        model_version: { type: string, examples: [harga_v1.0.0] }
+        dihitung_pada: { type: string, format: date-time }
+      examples:
+        - komoditas_id: cmd_cabai_merah
+          pasar_id: psr_jakarta_timur_01
+          deret:
+            - tanggal: "2026-10-05"
+              horizon: "H+1"
+              harga_prediksi: 42500
+              rentang_bawah: 39000
+              rentang_atas: 46000
+              kepercayaan: sedang
+          model_version: harga_v1.0.0
+          dihitung_pada: "2026-10-04T04:00:12+07:00"
+    PrediksiDemand:
+      type: object
+      required: [komoditas_id, zona, horizon, demand_prediksi_kg, sinyal, model_version]
+      properties:
+        jenis: { type: string, enum: [demand] }
+        komoditas_id: { $ref: "#/components/schemas/KomoditasId" }
+        zona: { type: string, examples: [bekasi_utara] }
+        tanggal: { type: string, format: date }
+        horizon: { $ref: "#/components/schemas/HorizonDemand" }
+        demand_prediksi_kg: { type: number, minimum: 0 }
+        rentang_bawah_kg: { type: number, minimum: 0 }
+        rentang_atas_kg: { type: number, minimum: 0 }
+        sinyal: { $ref: "#/components/schemas/Sinyal" }
+        rekomendasi:
+          type: array
+          maxItems: 3
+          items: { type: string }
+        model_version: { type: string, examples: [demand_v1.0.0] }
+      examples:
+        - komoditas_id: cmd_cabai_merah
+          zona: bekasi_utara
+          horizon: H+7_total_kg
+          demand_prediksi_kg: 840.0
+          sinyal: defisit
+          rekomendasi: ["Amankan pasokan dari Brebes; batasi promo; naikkan buffer stok 15%."]
+          model_version: demand_v1.0.0
+    PrediksiPanen:
+      type: object
+      required: [komoditas_id, kabupaten_id, minggu, panen_prediksi_kg, kepercayaan, model_version]
+      properties:
+        jenis: { type: string, enum: [panen] }
+        komoditas_id: { $ref: "#/components/schemas/KomoditasId" }
+        kabupaten_id: { $ref: "#/components/schemas/KabupatenId" }
+        minggu: { type: string, pattern: "^\\d{4}-W\\d{2}$", examples: ["2026-W41"] }
+        panen_prediksi_kg: { type: integer, multipleOf: 50, description: Kelipatan 50 kg. }
+        rentang_bawah_kg: { type: integer, minimum: 0 }
+        rentang_atas_kg: { type: integer, minimum: 0 }
+        kepercayaan: { $ref: "#/components/schemas/Kepercayaan" }
+        model_version: { type: string, examples: [panen_v1.0.0] }
+    PrediksiPanenRespons:
+      type: object
+      required: [deret]
+      properties:
+        deret:
+          type: array
+          items: { $ref: "#/components/schemas/PrediksiPanen" }
+        dihitung_pada: { type: string, format: date-time }
+
+    # ---------- rekomendasi, umpan-balik, analis
+    Rekomendasi:
+      type: object
+      required: [id, zona, teks, status]
+      properties:
+        id: { type: string }
+        zona: { type: string }
+        teks:
+          type: array
+          maxItems: 3
+          items: { type: string }
+          description: Maks 3 aksi per zona; angka dibulatkan ke 100 kg.
+        status: { type: string, enum: [baru, dikerjakan, selesai] }
+        penanggung_jawab: { type: string, description: Nama penanggung jawab. }
+        target_tanggal: { type: string, format: date }
+        catatan: { type: string, maxLength: 140 }
+    RekomendasiDaftar:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Rekomendasi" }
+        next_cursor: { type: [string, "null"] }
+    UbahStatusRekomendasi:
+      type: object
+      required: [status, catatan]
+      properties:
+        status: { type: string, enum: [dikerjakan, selesai] }
+        catatan: { type: string, maxLength: 140 }
+        penanggung_jawab: { type: string }
+        target_tanggal: { type: string, format: date }
+    UmpanBalik:
+      type: object
+      required: [nilai]
+      properties:
+        nilai: { type: string, enum: [bermanfaat, kurang_tepat] }
+        komentar: { type: string, maxLength: 280 }
+        komoditas_id: { $ref: "#/components/schemas/KomoditasId" }
+    AntreanValidasi:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items:
+            type: object
+            required: [event_id, event_type, flag]
+            properties:
+              event_id: { type: string, pattern: "^evt_\\d{8}_\\d{6}$" }
+              event_type: { $ref: "#/components/schemas/EventType" }
+              flag: { type: string, enum: [perlu_verifikasi] }
+              alasan_flag:
+                type: string
+                description: Contoh harga di luar rentang, stok selisih > 1%, panen outlier.
+        next_cursor: { type: [string, "null"] }
+    ValidasiAnalis:
+      type: object
+      required: [aksi_id, event_id, keputusan, alasan]
+      properties:
+        aksi_id: { type: string, examples: [aks_20261004_001] }
+        event_id: { type: string, pattern: "^evt_\\d{8}_\\d{6}$" }
+        keputusan: { type: string, enum: [setuju, koreksi_nilai, tolak] }
+        nilai_baru:
+          type: integer
+          description: Wajib bila `keputusan = koreksi_nilai` (IDR integer).
+        alasan: { type: string, minLength: 10, maxLength: 140 }
+    TahanPrediksi:
+      type: object
+      required: [aksi_id, komoditas_id, pasar_id, alasan, berlaku_sampai]
+      properties:
+        aksi_id: { type: string, examples: [aks_20261004_002] }
+        komoditas_id: { $ref: "#/components/schemas/KomoditasId" }
+        pasar_id: { $ref: "#/components/schemas/PasarId" }
+        alasan: { type: string, minLength: 10, maxLength: 140 }
+        berlaku_sampai:
+          type: string
+          format: date
+          description: Maks 7 hari dari hari ini; lewat itu kedaluwarsa otomatis.
